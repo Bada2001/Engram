@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "engram"
+version = "0.1.0"
+description = "Agnostic learning layer for decision systems"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.20.0",
+    "pyyaml>=6.0",
+    "click>=8.1",
+]
+
+[project.scripts]
+engram = "engram.cli:cli"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["engram*"]

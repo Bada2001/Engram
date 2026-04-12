@@ -1,0 +1,54 @@
+# engram.yaml for SupportTriage — AI-powered support ticket classifier
+# Drop this file in your project root and point Engram at it.
+
+name: "SupportTriage"
+domain: |
+  AI classifier that assigns priority (CRITICAL / HIGH / MEDIUM / LOW) to incoming
+  support tickets based on ticket text, customer tier, and product area.
+  Decisions are evaluated against actual resolution urgency — did the ticket turn out
+  to need the priority it was assigned?
+  Default when uncertain is MEDIUM. CRITICAL must be reserved for genuine outages or
+  data-loss scenarios. Misclassifying CRITICAL wastes on-call resources; under-classifying
+  HIGH tickets breaches SLA.
+
+outcome:
+  strategy: label_match         # correct if predicted priority == resolved priority
+  window_hours: 24              # evaluate 24h after the ticket is closed
+  min_window_hours: 1           # need at least 1h before evaluating
+  instrument_field: product_area  # group lessons per product area
+
+parameters:
+  - name: confidence_threshold
+    type: float
+    description: "Minimum model confidence to emit a CRITICAL label (currently 0.85)"
+  - name: escalation_keywords
+    type: list
+    description: "Keywords that auto-bump priority one level (e.g. 'data loss', 'outage')"
+  - name: customer_tier_weight
+    type: float_per_key
+    description: "Per-tier multiplier on urgency score (enterprise=1.5, pro=1.0, free=0.7)"
+  - name: max_context_messages
+    type: int
+    description: "Max prior ticket messages fed into the classifier prompt (currently 5)"
+  - name: retry_on_low_confidence
+    type: int
+    description: "Number of times to re-sample if confidence < threshold (currently 2)"
+
+proposal_categories:
+  - prompt
+  - threshold
+  - keyword
+  - tier_weights
+  - context
+  - architecture
+  - cost
+
+schedule:
+  diary_time: "18:00 Europe/Lisbon"   # end of business, review day's classifications
+  propose_time: "23:00 Europe/Lisbon"  # after most tickets are resolved for the day
+  checkpoint_day: friday
+  lesson_extraction: on_error         # also triggers when 3+ misclassifications in a day
+
+llm:
+  model: claude-sonnet-4-6
+  max_tokens: 1024
