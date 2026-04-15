@@ -1,0 +1,64 @@
+# engram.yaml — example configuration for an AI Q&A / RAG system
+
+name: "QuestionAnsweringAgent"
+domain: |
+  An AI assistant that answers user questions using a RAG pipeline.
+  It retrieves relevant documents from a vector store, constructs a prompt,
+  and generates an answer via an LLM. Decisions represent each answer given
+  to a user query: ANSWERED, REFUSED, or ESCALATED (handed off to a human).
+  Outcomes are labelled by human reviewers or inferred from user feedback
+  (thumbs up/down, follow-up clarification requests).
+
+  Key context fields available per decision:
+    - model: LLM model used (e.g. claude-sonnet-4-6)
+    - retrieval_score: top chunk cosine similarity (0.0–1.0)
+    - num_chunks: number of retrieved chunks used
+    - query_category: type of query (factual, procedural, opinion, etc.)
+    - confidence: self-reported model confidence (0.0–1.0)
+    - latency_ms: end-to-end response latency in milliseconds
+
+# How to assess whether a decision was correct.
+# binary: you call eng.outcome(decision_id, "correct"|"wrong"|"inconclusive")
+#         based on user feedback or human review.
+outcome:
+  strategy: binary
+
+# Tunable parameters — surfaced to the proposal generator so it can
+# suggest concrete threshold changes backed by evidence.
+parameters:
+  - name: retrieval_score_threshold
+    type: float
+    description: "Minimum cosine similarity to include a chunk. Below this, refuse or escalate."
+
+  - name: confidence_threshold
+    type: float
+    description: "Model self-reported confidence below which we escalate to a human."
+
+  - name: num_chunks
+    type: int
+    description: "Number of chunks retrieved per query. More chunks = more context but higher cost."
+
+  - name: max_tokens
+    type: int
+    description: "Max tokens in the generated answer. Affects verbosity and latency."
+
+# Proposal categories — tailor these to where your system can actually improve.
+proposal_categories:
+  - prompt           # system prompt or instruction changes
+  - retrieval        # chunking strategy, embedding model, top-k, score thresholds
+  - routing          # when to answer vs. refuse vs. escalate
+  - cost             # unnecessary LLM calls, redundant retrievals, token waste
+  - latency          # slow queries, inefficient retrieval paths
+  - architecture     # pipeline structure changes
+
+# Schedule — align diary_time with your system's natural day-end.
+schedule:
+  diary_time: "23:00 UTC"       # daily summary of decisions + outcomes
+  propose_time: "01:00 UTC"     # nightly proposal generation (runs after diary)
+  checkpoint_day: sunday        # weekly checkpoint compression
+  lesson_extraction: weekly     # weekly | on_error (also triggers on 3+ wrong calls)
+
+# LLM used by Engram itself for diary analysis, lesson extraction, and proposals.
+llm:
+  model: claude-sonnet-4-6
+  max_tokens: 2000

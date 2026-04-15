@@ -28,13 +28,10 @@ class Engram:
         eng.start()   # background scheduler: diary → extract → propose
 
         # Where a decision is made:
-        eng.observe("order-001", decision="BUY", context={"instrument": "brent", "conviction": 0.82})
+        eng.observe("req-001", decision="APPROVE", context={"model": "gpt-4o", "confidence": 0.91})
 
-        # Feed prices (required for price_movement outcome strategy):
-        eng.price("brent", 87.50)
-
-        # Push outcome explicitly (for binary strategy):
-        eng.outcome("order-001", "correct")
+        # Push outcome explicitly (binary strategy):
+        eng.outcome("req-001", "correct")
 
         # Retrieve active lessons for injection into prompts:
         for lesson in eng.active_lessons():
@@ -106,24 +103,6 @@ class Engram:
             "UPDATE decisions SET outcome = ?, outcome_ts = ?, outcome_raw = ? "
             "WHERE decision_id = ?",
             (result, now, json.dumps(metadata or {}), decision_id),
-        )
-
-    def price(
-        self,
-        instrument: str,
-        price: float,
-        ts: str | None = None,
-    ) -> None:
-        """
-        Feed a price data point.
-        Required when using strategy=price_movement.
-
-        instrument: matches the value of context[outcome.instrument_field]
-        """
-        ts = ts or datetime.now(timezone.utc).isoformat()
-        _db.execute(
-            "INSERT INTO prices (ts, instrument, price) VALUES (?, ?, ?)",
-            (ts, instrument, price),
         )
 
     def active_lessons(self) -> list[str]:

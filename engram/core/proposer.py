@@ -7,6 +7,8 @@ from datetime import datetime, timezone, timedelta
 import anthropic
 
 import engram.core.db as db
+import engram.core.stats as stats_mod
+import engram.core.codebase as codebase_mod
 from engram.schema import EngramSchema
 
 logger  = logging.getLogger(__name__)
@@ -84,13 +86,12 @@ def _collect(schema: EngramSchema) -> dict:
         exp = (l.get("expires_ts") or "")[:10] or "never"
         lesson_lines.append(f"• [{exp}] {l['text']}")
 
-    # Stats
-    total   = len(decisions)
-    correct = sum(1 for d in decisions if d.get("outcome") == "correct")
-    wrong   = sum(1 for d in decisions if d.get("outcome") == "wrong")
-    stats_text = (
-        f"Decisions: {total} | Correct: {correct} | Wrong: {wrong} "
-        f"| Pending: {total - correct - wrong}"
+    # Structured stats — computed before the LLM call, not derived from text
+    daily_stats  = stats_mod.compute(window_hours=24)
+    weekly_stats = stats_mod.compute(window_hours=168)
+    stats_text   = (
+        f"Last 24h:\n{stats_mod.format_for_llm(daily_stats)}\n\n"
+        f"Last 7 days:\n{stats_mod.format_for_llm(weekly_stats)}"
     )
 
     # Parameter schema
@@ -102,14 +103,19 @@ def _collect(schema: EngramSchema) -> dict:
                 f"  {p.get('name','')} ({p.get('type','?')}): {p.get('description','')}"
             )
 
+    # Codebase context — include files from config + files recently flagged in proposals
+    extra_files    = codebase_mod.recent_affected_files()
+    codebase_block = codebase_mod.read_context(schema.codebase, extra_files=extra_files)
+
     return {
-        "today_str": today_str,
-        "diary":     diary_text,
-        "decisions": "\n".join(decision_lines) or "(no decisions today)",
-        "lessons":   "\n".join(lesson_lines)   or "(no active lessons)",
-        "params":    "\n".join(params_lines),
-        "stats":     stats_text,
+        "today_str":  today_str,
+        "diary":      diary_text,
+        "decisions":  "\n".join(decision_lines) or "(no decisions today)",
+        "lessons":    "\n".join(lesson_lines)   or "(no active lessons)",
+        "params":     "\n".join(params_lines),
+        "stats":      stats_text,
         "categories": " | ".join(schema.proposal_categories),
+        "codebase":   codebase_block,
     }
 
 
@@ -126,7 +132,11 @@ Your job: analyse today's system behaviour and propose specific, evidence-backed
 
 Rules:
 - Every proposal MUST cite specific evidence from today (IDs, values, timestamps).
-- The proposal field explains direction + reasoning — not code, not diffs.
+- The proposal field explains direction + reasoning.
+- If source files are provided, the code_change field MUST contain a concrete, \
+minimal code snippet or diff showing exactly what to change. Be specific — show the \
+before/after or the exact lines to add/modify. If no source files are provided, \
+omit code_change entirely.
 - If today was quiet with no notable errors, return fewer (1-2) proposals.
 - Focus on systematic patterns, not one-off noise.
 - Cost proposals are valuable: flag unnecessary LLM calls, redundant cycles, \
@@ -147,7 +157,7 @@ _PROMPT_TMPL = """\
 
 ## Stats today
 {stats}
-
+{codebase_section}
 ---
 Analyse {name}'s behaviour today. Propose 3-7 improvements.
 
@@ -157,7 +167,7 @@ Each proposal MUST:
 1. Cite specific evidence from today (IDs, values, timestamps).
 2. Explain WHY this behaviour occurred — what rule or gap caused it.
 3. Suggest direction + reasoning (not code or diffs).
-
+{file_instruction}
 Return ONLY a JSON array — no prose, no markdown fences:
 [{{
   "category": "<one from the categories list>",
@@ -166,7 +176,8 @@ Return ONLY a JSON array — no prose, no markdown fences:
   "problem": "<what went wrong or what opportunity was missed>",
   "evidence": ["<specific example 1>", "<specific example 2>"],
   "proposal": "<direction and reasoning — what to change and why>",
-  "affected_files": "<comma-separated file paths>"
+  "affected_files": "<comma-separated file paths relative to codebase root>",
+  "code_change": "<concrete snippet or diff — only when source files were provided, otherwise omit>"
 }}]"""
 
 
@@ -175,14 +186,26 @@ def _call_llm(data: dict, schema: EngramSchema) -> list:
         name   = schema.name,
         domain = schema.domain[:300] or f"a decision system called {schema.name}",
     )
+    has_codebase   = bool(data.get("codebase"))
+    codebase_section = (
+        f"\n## Source files\n{data['codebase']}\n"
+        if has_codebase else ""
+    )
+    file_instruction = (
+        "4. Reference specific file paths and line areas from the source files above when relevant.\n"
+        if has_codebase else ""
+    )
+
     prompt = _PROMPT_TMPL.format(
-        name       = schema.name,
-        diary      = data["diary"],
-        decisions  = data["decisions"],
-        lessons    = data["lessons"],
-        params     = data["params"],
-        stats      = data["stats"],
-        categories = data["categories"],
+        name             = schema.name,
+        diary            = data["diary"],
+        decisions        = data["decisions"],
+        lessons          = data["lessons"],
+        params           = data["params"],
+        stats            = data["stats"],
+        categories       = data["categories"],
+        codebase_section = codebase_section,
+        file_instruction = file_instruction,
     )
     resp = _get_client().messages.create(
         model       = schema.llm.model,
@@ -232,11 +255,12 @@ def _write(proposals: list, today_str: str) -> int:
             logger.info("Proposer: duplicate skipped — %s", title[:60])
             continue
 
+        code_change = (p.get("code_change") or "").strip() or None
         db.execute(
             "INSERT INTO proposals "
             "(written_ts, analysis_date, category, priority, title, problem, "
-            "evidence, proposal, affected_files, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+            "evidence, proposal, affected_files, code_change, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
             (
                 now_iso,
                 today_str,
@@ -247,9 +271,11 @@ def _write(proposals: list, today_str: str) -> int:
                 json.dumps(p.get("evidence") or []),
                 (p.get("proposal") or "").strip(),
                 (p.get("affected_files") or "").strip(),
+                code_change,
             ),
         )
         written += 1
-        logger.info("Proposer: [%s] %s", p.get("category", "?"), title[:60])
+        has_code = " [+code]" if code_change else ""
+        logger.info("Proposer: [%s]%s %s", p.get("category", "?"), has_code, title[:60])
 
     return written

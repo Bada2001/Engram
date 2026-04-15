@@ -44,20 +44,14 @@ def init() -> None:
             CREATE INDEX IF NOT EXISTS idx_dec_ts  ON decisions(ts);
             CREATE INDEX IF NOT EXISTS idx_dec_did ON decisions(decision_id);
 
-            CREATE TABLE IF NOT EXISTS prices (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts         TEXT NOT NULL,
-                instrument TEXT NOT NULL,
-                price      REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_prices ON prices(instrument, ts);
-
             CREATE TABLE IF NOT EXISTS lessons (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                written_ts TEXT NOT NULL,
-                expires_ts TEXT,
-                type       TEXT DEFAULT 'lesson',
-                text       TEXT NOT NULL
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                written_ts        TEXT NOT NULL,
+                expires_ts        TEXT,
+                type              TEXT DEFAULT 'lesson',
+                text              TEXT NOT NULL,
+                source_data       TEXT,
+                baseline_accuracy REAL
             );
             CREATE INDEX IF NOT EXISTS idx_lessons ON lessons(type, written_ts);
 
@@ -72,6 +66,7 @@ def init() -> None:
                 evidence       TEXT NOT NULL,
                 proposal       TEXT NOT NULL,
                 affected_files TEXT,
+                code_change    TEXT,
                 status         TEXT NOT NULL DEFAULT 'pending',
                 user_notes     TEXT,
                 implemented_ts TEXT
@@ -80,6 +75,19 @@ def init() -> None:
             CREATE INDEX IF NOT EXISTS idx_proposals_date   ON proposals(analysis_date);
         """)
         conn.commit()
+
+        # Migrations — safe to run on existing databases
+        for col, typedef in [
+            ("baseline_accuracy", "REAL"),
+            ("source_data",       "TEXT"),
+            ("code_change",       "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE lessons ADD COLUMN {col} {typedef}")
+                conn.commit()
+            except Exception:
+                pass  # column already exists
+
         logger.debug("Engram DB initialised: %s", _db_path)
 
 

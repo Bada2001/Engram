@@ -18,22 +18,35 @@ domain: |
 
 # How to assess whether a decision was correct
 outcome:
-  strategy: binary          # binary | price_movement | score | custom
+  strategy: binary          # binary | score | custom
   #
-  # binary: host calls eng.outcome(decision_id, "correct"|"wrong"|"inconclusive")
+  # binary: you call eng.outcome(decision_id, "correct"|"wrong"|"inconclusive") explicitly
   #
-  # price_movement options:
-  # threshold_pct: 0.5         # % price move required to call correct/wrong
-  # window_hours: 6            # hours after decision to evaluate
-  # min_window_hours: 4        # minimum elapsed before evaluating
-  # instrument_field: instrument  # context key holding the instrument name
+  # score: outcome is a numeric field already in context
+  # score_field: score         # key in the context dict holding the score
+  # score_threshold: 0.5       # score >= threshold → correct
   #
-  # score options:
-  # score_field: score
-  # score_threshold: 0.5
+  # custom: point to any callable — receives the full decision dict, returns outcome string
+  # assessor: "myapp.outcomes.assess"
   #
-  # custom option:
-  # assessor: "myapp.outcomes.assess"  # dotted path to callable
+  # Custom assessor signature:
+  #   def assess(decision: dict) -> str | None:
+  #       # decision keys: decision_id, decision, context (dict), ts, outcome, outcome_ts
+  #       # return: "correct" | "wrong" | "inconclusive" | None (pending)
+
+# Codebase observation — Engram reads these files and includes them in proposal context
+# so proposals can reference specific files, functions, and line areas.
+# codebase:
+#   dir: "."                   # root of the repo (relative to engram.yaml)
+#   include:                   # files, directories, or glob patterns (relative to dir)
+#     - "core"                 # entire directory (all files, non-recursive)
+#     - "core/**/*.py"         # recursive glob
+#     - "config/settings.py"  # single file
+#   exclude:                   # patterns to skip (applied to any path component)
+#     - ".venv"
+#     - "__pycache__"
+#     - "*.pyc"
+#   max_chars: 8000            # total character budget across all included files
 
 # Tunable parameters (used as context for proposal generation)
 parameters:
@@ -55,7 +68,7 @@ schedule:
   diary_time: "17:30 UTC"       # daily diary (match your system's day-end)
   propose_time: "01:00 UTC"     # nightly proposals (runs after diary)
   checkpoint_day: sunday        # weekly checkpoint + lesson extraction
-  lesson_extraction: weekly     # weekly | on_error (triggers when 3+ wrong calls)
+  lesson_extraction: weekly     # weekly | on_error (triggers when error rate > 30%)
 
 # LLM settings
 llm:
@@ -272,6 +285,22 @@ def report(schema: str, db: str | None, days: int):
 # ---------------------------------------------------------------------------
 # Manual triggers
 # ---------------------------------------------------------------------------
+
+@cli.command()
+@click.option("--schema", default="engram.yaml", show_default=True)
+@click.option("--db", default=None)
+@click.option("--port", default=4242, show_default=True)
+@click.option("--host", default="127.0.0.1", show_default=True)
+def ui(schema: str, db: str | None, port: int, host: str):
+    """Start the web UI for reviewing proposals and lessons."""
+    import logging
+    logging.basicConfig(level=logging.WARNING)
+    eng = _load(schema, db)
+    from engram.web import create_app
+    app = create_app(schema=eng._schema)
+    click.echo(f"Engram UI → http://{host}:{port}")
+    app.run(host=host, port=port, debug=False, use_reloader=False)
+
 
 @cli.command(name="diary")
 @click.option("--schema", default="engram.yaml", show_default=True)
