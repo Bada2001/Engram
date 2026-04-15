@@ -394,19 +394,17 @@ _HTML = """<!DOCTYPE html>
 
     let actionsHtml;
     if (p.status === 'pending') {
-      const hasCode = p.code_change && p.affected_files;
+      const hasFiles = !!p.affected_files;
       actionsHtml = `
         <div class="actions">
           <textarea id="notes-${p.id}" class="notes-input" placeholder="Notes (optional)..."></textarea>
           <div class="action-buttons">
-            ${hasCode ? `
+            ${hasFiles ? `
               <button class="btn btn-apply-code" id="btn-apply-code-${p.id}" onclick="applyCode(${p.id})">
                 <span class="spinner" id="spinner-${p.id}"></span>
-                Apply code
-              </button>` : ''}
-            <button class="btn btn-apply" onclick="markApplied(${p.id})">
-              ${hasCode ? 'Mark applied' : 'Apply'}
-            </button>
+                Apply
+              </button>` : `
+              <button class="btn btn-apply" onclick="markApplied(${p.id})">Apply</button>`}
             <button class="btn btn-reject" onclick="rejectProposal(${p.id})">Reject</button>
           </div>
           <div class="apply-result" id="result-${p.id}"></div>
@@ -673,7 +671,7 @@ def create_app(schema=None) -> Flask:
             rows = db.fetchall(
                 "SELECT * FROM proposals WHERE status = 'pending' "
                 "ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, "
-                "written_ts DESC"
+                "written_ts DESC LIMIT 100"
             )
         for r in rows:
             try:
@@ -702,8 +700,6 @@ def create_app(schema=None) -> Flask:
         proposal = db.fetchone("SELECT * FROM proposals WHERE id = ?", (proposal_id,))
         if not proposal:
             return jsonify({"error": "Proposal not found"}), 404
-        if not proposal.get("code_change"):
-            return jsonify({"error": "This proposal has no code change"}), 400
 
         s = app.config.get("SCHEMA")
         if not s or not s.codebase.dir:
@@ -716,6 +712,12 @@ def create_app(schema=None) -> Flask:
         ]
         if not affected:
             return jsonify({"error": "No affected_files on this proposal"}), 400
+
+        # Use explicit code_change if available, otherwise use the proposal description
+        instruction = (proposal.get("code_change") or "").strip() or (
+            f"Problem: {proposal.get('problem', '')}\n\n"
+            f"Proposal: {proposal.get('proposal', '')}"
+        )
 
         root    = Path(s.codebase.dir).resolve()
         results = []
@@ -745,9 +747,9 @@ def create_app(schema=None) -> Flask:
                     messages=[{
                         "role": "user",
                         "content": (
-                            f"## Proposed change\n{proposal['code_change']}\n\n"
+                            f"## Requested change\n{instruction}\n\n"
                             f"## Current content of {rel_path}\n{current}\n\n"
-                            f"Apply the proposed change to this file. "
+                            f"Apply the requested change to this file. "
                             f"Return the complete updated file content only."
                         ),
                     }],
