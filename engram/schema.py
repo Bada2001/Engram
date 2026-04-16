@@ -49,6 +49,9 @@ class EngramSchema:
     proposal_categories: list[str] = field(default_factory=lambda: [
         "prompt", "threshold", "parameter", "timing", "architecture", "cost",
     ])
+    creative_proposal_categories: list[str] = field(default_factory=lambda: [
+        "new_signal", "new_source", "new_strategy", "opportunity",
+    ])
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     codebase: CodebaseConfig = field(default_factory=CodebaseConfig)
@@ -68,8 +71,9 @@ def _parse(raw: dict) -> EngramSchema:
             assessor        = o.get("assessor", ""),
         )
 
-    s.parameters          = raw.get("parameters", [])
-    s.proposal_categories = raw.get("proposal_categories", s.proposal_categories)
+    s.parameters                    = raw.get("parameters", [])
+    s.proposal_categories           = raw.get("proposal_categories", s.proposal_categories)
+    s.creative_proposal_categories  = raw.get("creative_proposal_categories", s.creative_proposal_categories)
 
     if "schedule" in raw:
         sc = raw["schedule"]

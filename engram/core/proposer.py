@@ -23,13 +23,18 @@ def _get_client() -> anthropic.Anthropic:
 
 
 def run(schema: EngramSchema) -> None:
-    """Load today's data, call LLM, write proposals. Idempotent (deduped by title)."""
+    """Load today's data, call LLM x2 (engineering + creative), write proposals."""
     logger.info("Proposer: starting for '%s'", schema.name)
     try:
-        data      = _collect(schema)
+        data = _collect(schema)
+
         proposals = _call_llm(data, schema)
-        n         = _write(proposals, data["today_str"])
-        logger.info("Proposer: %d proposals written", n)
+        n = _write(proposals, data["today_str"])
+        logger.info("Proposer: %d engineering proposals written", n)
+
+        creative = _call_llm_creative(data, schema)
+        nc = _write(creative, data["today_str"])
+        logger.info("Proposer: %d creative proposals written", nc)
     except Exception as e:
         logger.error("Proposer: failed — %s", e)
         import traceback
@@ -142,6 +147,23 @@ omit code_change entirely.
 - Cost proposals are valuable: flag unnecessary LLM calls, redundant cycles, \
 sources that never produce useful output."""
 
+_SYSTEM_CREATIVE_TMPL = """\
+You are a creative strategist and domain expert reviewing {name}.
+
+Domain: {domain}
+
+Your job: look at today's data and invent genuinely NEW capabilities, signals, sources, \
+or strategies that do NOT yet exist in the system. Do not fix existing bugs — that is \
+handled elsewhere. Think boldly.
+
+Rules:
+- Propose things that are ABSENT from the current system entirely.
+- Each idea must be grounded in the data (accuracy patterns, missed signals, \
+blind spots visible in the decisions).
+- Do not suggest code tweaks. Suggest what the system SHOULD be able to do or monitor.
+- No affected_files. No code_change. These are strategic recommendations.
+- If the data is too thin to inspire genuine new ideas, return 1-2 ideas max."""
+
 _PROMPT_TMPL = """\
 ## Today's Diary
 {diary}
@@ -180,6 +202,52 @@ Return ONLY a JSON array — no prose, no markdown fences:
   "code_change": "<concrete snippet or diff — only when source files were provided, otherwise omit>"
 }}]"""
 
+_PROMPT_CREATIVE_TMPL = """\
+## Today's Diary
+{diary}
+
+## Decisions (last 24h) with outcomes
+{decisions}
+
+## Active lessons
+{lessons}
+
+## Stats today
+{stats}
+
+## System parameters
+{params}
+---
+Based on today's data for {name}, propose 2-4 genuinely NEW ideas — \
+capabilities, signals, data sources, or strategies that do not exist in the system yet.
+
+Each idea must be grounded in a pattern or gap visible in the data above.
+
+Categories: {categories}
+
+Return ONLY a JSON array — no prose, no markdown fences:
+[{{
+  "category": "<one from the categories list>",
+  "priority": "high|medium|low",
+  "title": "<max 80 chars>",
+  "problem": "<what gap or opportunity this addresses>",
+  "evidence": ["<pattern or signal from today that motivates this>"],
+  "proposal": "<the new idea — what it is, why it would help, how it would work at a high level>"
+}}]"""
+
+
+def _parse_json_array(raw: str) -> list:
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.rsplit("```", 1)[0].strip()
+    start = raw.find("[")
+    end   = raw.rfind("]")
+    if start == -1 or end == -1:
+        return []
+    return json.loads(raw[start:end + 1])
+
 
 def _call_llm(data: dict, schema: EngramSchema) -> list:
     system = _SYSTEM_TMPL.format(
@@ -214,21 +282,42 @@ def _call_llm(data: dict, schema: EngramSchema) -> list:
         system      = system,
         messages    = [{"role": "user", "content": prompt}],
     )
-    raw = resp.content[0].text.strip()
+    return _parse_json_array(resp.content[0].text.strip())
 
-    # Strip markdown fences if model adds them anyway
-    if raw.startswith("```"):
-        raw = raw.split("```", 2)[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.rsplit("```", 1)[0].strip()
 
-    start = raw.find("[")
-    end   = raw.rfind("]")
-    if start == -1 or end == -1:
-        logger.error("Proposer: no JSON array in LLM response")
-        return []
-    return json.loads(raw[start:end + 1])
+def _call_llm_creative(data: dict, schema: EngramSchema) -> list:
+    """Second LLM pass: creative strategist inventing new capabilities."""
+    creative_categories = (
+        schema.creative_proposal_categories
+        if schema.creative_proposal_categories
+        else ["new_signal", "new_source", "new_strategy", "opportunity"]
+    )
+    system = _SYSTEM_CREATIVE_TMPL.format(
+        name   = schema.name,
+        domain = schema.domain[:300] or f"a decision system called {schema.name}",
+    )
+    prompt = _PROMPT_CREATIVE_TMPL.format(
+        name       = schema.name,
+        diary      = data["diary"],
+        decisions  = data["decisions"],
+        lessons    = data["lessons"],
+        params     = data["params"],
+        stats      = data["stats"],
+        categories = " | ".join(creative_categories),
+    )
+    resp = _get_client().messages.create(
+        model       = schema.llm.model,
+        max_tokens  = schema.llm.max_tokens,
+        temperature = 0.7,
+        system      = system,
+        messages    = [{"role": "user", "content": prompt}],
+    )
+    proposals = _parse_json_array(resp.content[0].text.strip())
+    # Ensure no affected_files / code_change leaks in from the model
+    for p in proposals:
+        p.pop("affected_files", None)
+        p.pop("code_change", None)
+    return proposals
 
 
 # ---------------------------------------------------------------------------
