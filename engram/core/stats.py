@@ -21,9 +21,10 @@ def compute(window_hours: int = 24) -> dict:
         (since,),
     )
 
-    evaluated = [r for r in rows if r.get("outcome") in ("correct", "wrong")]
-    correct   = sum(1 for r in evaluated if r["outcome"] == "correct")
-    wrong     = len(evaluated) - correct
+    evaluated    = [r for r in rows if r.get("outcome") in ("correct", "wrong")]
+    correct      = sum(1 for r in evaluated if r["outcome"] == "correct")
+    wrong        = len(evaluated) - correct
+    inconclusive = sum(1 for r in rows if r.get("outcome") == "inconclusive")
 
     # Accuracy by decision type
     by_type: dict[str, Counter] = defaultdict(Counter)
@@ -41,15 +42,19 @@ def compute(window_hours: int = 24) -> dict:
         except Exception:
             pass
 
+    n_eval = len(evaluated)
+    n_total = len(rows)
     return {
-        "window_hours":     window_hours,
-        "total":            len(rows),
-        "evaluated":        len(evaluated),
-        "correct":          correct,
-        "wrong":            wrong,
-        "accuracy_pct":     round(correct / len(evaluated) * 100, 1) if evaluated else None,
-        "by_decision_type": {k: dict(v) for k, v in by_type.items()},
-        "by_context_field": {
+        "window_hours":       window_hours,
+        "total":              n_total,
+        "evaluated":          n_eval,
+        "correct":            correct,
+        "wrong":              wrong,
+        "inconclusive":       inconclusive,
+        "accuracy_pct":       round(correct / n_eval * 100, 1) if n_eval else None,
+        "inconclusive_rate":  round(inconclusive / (n_eval + inconclusive), 4) if (n_eval + inconclusive) > 0 else None,
+        "by_decision_type":   {k: dict(v) for k, v in by_type.items()},
+        "by_context_field":   {
             k: {v2: dict(c) for v2, c in vals.items()}
             for k, vals in by_context.items()
         },

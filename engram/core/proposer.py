@@ -42,6 +42,108 @@ def run(schema: EngramSchema) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Goals gap + trend
+# ---------------------------------------------------------------------------
+
+def _write_goal_snapshot(stats: dict) -> None:
+    """Persist today's goal metrics once per day so future runs can show trend."""
+    today_start = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00")
+    existing = db.fetchone(
+        "SELECT id FROM lessons WHERE type = 'goal_snapshot' AND written_ts >= ?",
+        (today_start,),
+    )
+    if existing:
+        return
+    acc = stats.get("accuracy_pct")
+    payload = {
+        "date":              datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "evaluated":         stats.get("evaluated", 0),
+        "correct_rate":      round(acc / 100, 4) if acc is not None else None,
+        "inconclusive_rate": stats.get("inconclusive_rate"),
+    }
+    expires = (datetime.now(timezone.utc) + timedelta(days=90)).isoformat()
+    db.execute(
+        "INSERT INTO lessons (written_ts, expires_ts, type, text, source_data) "
+        "VALUES (?, ?, 'goal_snapshot', ?, ?)",
+        (datetime.now(timezone.utc).isoformat(), expires,
+         f"{payload['date']} goal snapshot", json.dumps(payload)),
+    )
+
+
+def _load_goal_trend(n: int = 7) -> list[dict]:
+    """Return last n goal snapshots, oldest first."""
+    rows = db.fetchall(
+        "SELECT source_data FROM lessons WHERE type = 'goal_snapshot' "
+        "ORDER BY written_ts DESC LIMIT ?",
+        (n,),
+    )
+    result = []
+    for r in rows:
+        try:
+            result.append(json.loads(r.get("source_data") or "{}"))
+        except Exception:
+            pass
+    return list(reversed(result))
+
+
+def _trend_str(snapshots: list[dict], field: str) -> str:
+    """Summarise direction from a list of daily snapshots for a given field (all 0-1 scale)."""
+    vals = [s[field] for s in snapshots if s.get(field) is not None]
+    if len(vals) < 2:
+        return ""
+    points = " → ".join(f"{v:.1%}" for v in vals[-4:])
+    if vals[-1] > vals[0] + 0.005:
+        direction = "↑ improving"
+    elif vals[-1] < vals[0] - 0.005:
+        direction = "↓ declining"
+    else:
+        direction = "→ flat"
+    return f"    trend ({len(vals)}d): {points}  {direction}"
+
+
+def _format_goals_gap(goals, stats: dict, trend: list[dict]) -> list[str]:
+    """Return goal lines with current vs target, verdict, and multi-day trend."""
+    lines: list[str] = []
+    evaluated = stats.get("evaluated", 0)
+    enough    = evaluated >= goals.min_decisions_to_evaluate
+
+    def _verdict(current: float | None, target: float, higher_is_better: bool = True) -> str:
+        if current is None or not enough:
+            return f"INSUFFICIENT DATA ({evaluated}/{goals.min_decisions_to_evaluate} evaluated)"
+        gap = current - target if higher_is_better else target - current
+        if gap >= 0:
+            return f"ON TRACK  (gap: +{abs(gap):.1%})"
+        return f"BEHIND  (gap: -{abs(gap):.1%})"
+
+    if goals.target_correct_rate is not None:
+        current = (stats["accuracy_pct"] / 100) if stats.get("accuracy_pct") is not None else None
+        verdict = _verdict(current, goals.target_correct_rate)
+        current_str = f"{current:.1%}" if current is not None else "n/a"
+        lines.append(f"  correct_rate:      current={current_str}  target={goals.target_correct_rate:.0%}  → {verdict}")
+        t = _trend_str(trend, "correct_rate")
+        if t:
+            lines.append(t)
+
+    if goals.max_inconclusive_rate is not None:
+        current = stats.get("inconclusive_rate")
+        verdict = _verdict(current, goals.max_inconclusive_rate, higher_is_better=False)
+        current_str = f"{current:.1%}" if current is not None else "n/a"
+        lines.append(f"  inconclusive_rate: current={current_str}  max={goals.max_inconclusive_rate:.0%}  → {verdict}")
+        t = _trend_str(trend, "inconclusive_rate")
+        if t:
+            lines.append(t)
+
+    for c in (goals.custom or []):
+        lines.append(f"  {c.get('name', 'custom')}: target={c.get('target', '')}  (manual goal — assess from data above)")
+
+    if not lines:
+        lines.append("  (no goals defined)")
+
+    lines.append(f"  [evaluated decisions: {evaluated} / min required: {goals.min_decisions_to_evaluate}]")
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Data collection
 # ---------------------------------------------------------------------------
 
@@ -99,6 +201,11 @@ def _collect(schema: EngramSchema) -> dict:
         f"Last 7 days:\n{stats_mod.format_for_llm(weekly_stats)}"
     )
 
+    # Goals — compute gap + trend
+    _write_goal_snapshot(daily_stats)
+    goal_trend  = _load_goal_trend()
+    goals_lines = _format_goals_gap(schema.goals, daily_stats, goal_trend)
+
     # Parameter schema
     params_lines = [f"System: {schema.name}", f"Domain: {schema.domain[:300]}"]
     if schema.parameters:
@@ -118,6 +225,7 @@ def _collect(schema: EngramSchema) -> dict:
         "decisions":  "\n".join(decision_lines) or "(no decisions today)",
         "lessons":    "\n".join(lesson_lines)   or "(no active lessons)",
         "params":     "\n".join(params_lines),
+        "goals":      "\n".join(goals_lines) if goals_lines else "(no goals defined)",
         "stats":      stats_text,
         "categories": " | ".join(schema.proposal_categories),
         "codebase":   codebase_block,
@@ -177,11 +285,16 @@ _PROMPT_TMPL = """\
 ## System parameters
 {params}
 
+## Performance goals
+{goals}
+
 ## Stats today
 {stats}
 {codebase_section}
 ---
 Analyse {name}'s behaviour today. Propose 3-7 improvements.
+Use the performance goals above as the benchmark — flag clearly whether the system is on track, \
+behind, or has no enough data yet to judge.
 
 Categories: {categories}
 
@@ -217,6 +330,10 @@ _PROMPT_CREATIVE_TMPL = """\
 
 ## System parameters
 {params}
+
+## Performance goals
+{goals}
+
 ---
 Based on today's data for {name}, propose 2-4 genuinely NEW ideas — \
 capabilities, signals, data sources, or strategies that do not exist in the system yet.
@@ -270,6 +387,7 @@ def _call_llm(data: dict, schema: EngramSchema) -> list:
         decisions        = data["decisions"],
         lessons          = data["lessons"],
         params           = data["params"],
+        goals            = data["goals"],
         stats            = data["stats"],
         categories       = data["categories"],
         codebase_section = codebase_section,
@@ -302,6 +420,7 @@ def _call_llm_creative(data: dict, schema: EngramSchema) -> list:
         decisions  = data["decisions"],
         lessons    = data["lessons"],
         params     = data["params"],
+        goals      = data["goals"],
         stats      = data["stats"],
         categories = " | ".join(creative_categories),
     )

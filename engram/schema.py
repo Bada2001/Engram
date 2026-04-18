@@ -41,11 +41,20 @@ class CodebaseConfig:
 
 
 @dataclass
+class GoalsConfig:
+    target_correct_rate: float | None = None    # e.g. 0.60 → aim for 60%+ correct decisions
+    min_decisions_to_evaluate: int = 20         # don't judge performance below this count
+    max_inconclusive_rate: float | None = None  # e.g. 0.30 → flag if >30% inconclusive
+    custom: list[dict] = field(default_factory=list)  # [{"name": "...", "target": "..."}]
+
+
+@dataclass
 class EngramSchema:
     name: str = "Unnamed"
     domain: str = ""
     outcome: OutcomeConfig = field(default_factory=OutcomeConfig)
     parameters: list[dict] = field(default_factory=list)
+    goals: GoalsConfig = field(default_factory=GoalsConfig)
     proposal_categories: list[str] = field(default_factory=lambda: [
         "prompt", "threshold", "parameter", "timing", "architecture", "cost",
     ])
@@ -74,6 +83,15 @@ def _parse(raw: dict) -> EngramSchema:
     s.parameters                    = raw.get("parameters", [])
     s.proposal_categories           = raw.get("proposal_categories", s.proposal_categories)
     s.creative_proposal_categories  = raw.get("creative_proposal_categories", s.creative_proposal_categories)
+
+    if "goals" in raw:
+        g = raw["goals"]
+        s.goals = GoalsConfig(
+            target_correct_rate       = float(g["target_correct_rate"]) if "target_correct_rate" in g else None,
+            min_decisions_to_evaluate = int(g.get("min_decisions_to_evaluate", 20)),
+            max_inconclusive_rate     = float(g["max_inconclusive_rate"]) if "max_inconclusive_rate" in g else None,
+            custom                    = g.get("custom", []),
+        )
 
     if "schedule" in raw:
         sc = raw["schedule"]
