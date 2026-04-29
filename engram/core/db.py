@@ -88,6 +88,17 @@ def init() -> None:
             except Exception:
                 pass  # column already exists
 
+        # Proposal provenance — JSON arrays of lesson/decision IDs that motivated each proposal
+        for col, typedef in [
+            ("source_lesson_ids",   "TEXT"),
+            ("source_decision_ids", "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE proposals ADD COLUMN {col} {typedef}")
+                conn.commit()
+            except Exception:
+                pass
+
         logger.debug("Engram DB initialised: %s", _db_path)
 
 

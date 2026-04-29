@@ -153,7 +153,7 @@ def _collect(schema: EngramSchema) -> dict:
 
     # Decisions + outcomes
     decisions = db.fetchall(
-        "SELECT ts, decision_id, decision, context, outcome FROM decisions "
+        "SELECT id, ts, decision_id, decision, context, outcome FROM decisions "
         "WHERE ts >= ? ORDER BY ts ASC",
         (since,),
     )
@@ -167,7 +167,7 @@ def _collect(schema: EngramSchema) -> dict:
         outcome_str = d.get("outcome") or "pending"
         ctx_short   = json.dumps(ctx)[:120].replace("\n", " ")
         decision_lines.append(
-            f"[{d['ts'][:16]}] {d['decision_id']} → {d['decision']} "
+            f"[#{d['id']} {d['ts'][:16]}] {d['decision_id']} → {d['decision']} "
             f"outcome={outcome_str} ctx={ctx_short}"
         )
 
@@ -183,7 +183,7 @@ def _collect(schema: EngramSchema) -> dict:
     # Active lessons
     now_iso     = datetime.now(timezone.utc).isoformat()
     lesson_rows = db.fetchall(
-        "SELECT text, expires_ts FROM lessons "
+        "SELECT id, text, expires_ts FROM lessons "
         "WHERE type = 'lesson' AND (expires_ts IS NULL OR expires_ts > ?) "
         "ORDER BY written_ts DESC LIMIT 20",
         (now_iso,),
@@ -191,7 +191,20 @@ def _collect(schema: EngramSchema) -> dict:
     lesson_lines = []
     for l in lesson_rows:
         exp = (l.get("expires_ts") or "")[:10] or "never"
-        lesson_lines.append(f"• [{exp}] {l['text']}")
+        lesson_lines.append(f"• [#{l['id']}, exp:{exp}] {l['text']}")
+
+    # Recent proposals (last 30 days, any status) — prevents proposer from re-emitting near-duplicates
+    recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    recent_props  = db.fetchall(
+        "SELECT id, status, category, title FROM proposals "
+        "WHERE written_ts >= ? "
+        "ORDER BY written_ts DESC LIMIT 60",
+        (recent_cutoff,),
+    )
+    recent_lines = [
+        f"  [#{p['id']}, {p['status']}, {p.get('category','?')}] {p['title']}"
+        for p in recent_props
+    ]
 
     # Structured stats — computed before the LLM call, not derived from text
     daily_stats  = stats_mod.compute(window_hours=24)
@@ -220,15 +233,16 @@ def _collect(schema: EngramSchema) -> dict:
     codebase_block = codebase_mod.read_context(schema.codebase, extra_files=extra_files)
 
     return {
-        "today_str":  today_str,
-        "diary":      diary_text,
-        "decisions":  "\n".join(decision_lines) or "(no decisions today)",
-        "lessons":    "\n".join(lesson_lines)   or "(no active lessons)",
-        "params":     "\n".join(params_lines),
-        "goals":      "\n".join(goals_lines) if goals_lines else "(no goals defined)",
-        "stats":      stats_text,
-        "categories": " | ".join(schema.proposal_categories),
-        "codebase":   codebase_block,
+        "today_str":         today_str,
+        "diary":             diary_text,
+        "decisions":         "\n".join(decision_lines) or "(no decisions today)",
+        "lessons":           "\n".join(lesson_lines)   or "(no active lessons)",
+        "recent_proposals":  "\n".join(recent_lines)   or "(none)",
+        "params":            "\n".join(params_lines),
+        "goals":             "\n".join(goals_lines) if goals_lines else "(no goals defined)",
+        "stats":             stats_text,
+        "categories":        " | ".join(schema.proposal_categories),
+        "codebase":          codebase_block,
     }
 
 
@@ -276,11 +290,14 @@ _PROMPT_TMPL = """\
 ## Today's Diary
 {diary}
 
-## Decisions (last 24h) with outcomes
+## Decisions (last 24h) with outcomes — IDs in [#…]
 {decisions}
 
-## Active lessons already applied
+## Active lessons already applied — IDs in [#…]
 {lessons}
+
+## Recently proposed (last 30 days, all statuses) — DO NOT re-propose these or near-duplicates
+{recent_proposals}
 
 ## System parameters
 {params}
@@ -296,12 +313,17 @@ Analyse {name}'s behaviour today. Propose 3-7 improvements.
 Use the performance goals above as the benchmark — flag clearly whether the system is on track, \
 behind, or has no enough data yet to judge.
 
+If a proposed direction is materially the same as something in "Recently proposed" \
+(regardless of its status), skip it — re-emitting near-duplicates is worse than fewer proposals.
+
 Categories: {categories}
 
 Each proposal MUST:
 1. Cite specific evidence from today (IDs, values, timestamps).
 2. Explain WHY this behaviour occurred — what rule or gap caused it.
 3. Suggest direction + reasoning (not code or diffs).
+4. List source_lesson_ids and/or source_decision_ids for the lessons or decisions above \
+that directly motivated this proposal. Empty arrays if none apply.
 {file_instruction}
 Return ONLY a JSON array — no prose, no markdown fences:
 [{{
@@ -311,6 +333,8 @@ Return ONLY a JSON array — no prose, no markdown fences:
   "problem": "<what went wrong or what opportunity was missed>",
   "evidence": ["<specific example 1>", "<specific example 2>"],
   "proposal": "<direction and reasoning — what to change and why>",
+  "source_lesson_ids": [<int>, ...],
+  "source_decision_ids": [<int>, ...],
   "affected_files": "<comma-separated file paths relative to codebase root>",
   "code_change": "<concrete snippet or diff — only when source files were provided, otherwise omit>"
 }}]"""
@@ -322,8 +346,11 @@ _PROMPT_CREATIVE_TMPL = """\
 ## Decisions (last 24h) with outcomes
 {decisions}
 
-## Active lessons
+## Active lessons — IDs in [#…]
 {lessons}
+
+## Recently proposed (last 30 days, all statuses) — DO NOT re-propose
+{recent_proposals}
 
 ## Stats today
 {stats}
@@ -339,6 +366,8 @@ Based on today's data for {name}, propose 2-4 genuinely NEW ideas — \
 capabilities, signals, data sources, or strategies that do not exist in the system yet.
 
 Each idea must be grounded in a pattern or gap visible in the data above.
+Skip any idea that is materially the same as something in "Recently proposed" — \
+fewer fresh ideas beat repeated ones.
 
 Categories: {categories}
 
@@ -349,7 +378,9 @@ Return ONLY a JSON array — no prose, no markdown fences:
   "title": "<max 80 chars>",
   "problem": "<what gap or opportunity this addresses>",
   "evidence": ["<pattern or signal from today that motivates this>"],
-  "proposal": "<the new idea — what it is, why it would help, how it would work at a high level>"
+  "proposal": "<the new idea — what it is, why it would help, how it would work at a high level>",
+  "source_lesson_ids": [<int>, ...],
+  "source_decision_ids": [<int>, ...]
 }}]"""
 
 
@@ -382,16 +413,17 @@ def _call_llm(data: dict, schema: EngramSchema) -> list:
     )
 
     prompt = _PROMPT_TMPL.format(
-        name             = schema.name,
-        diary            = data["diary"],
-        decisions        = data["decisions"],
-        lessons          = data["lessons"],
-        params           = data["params"],
-        goals            = data["goals"],
-        stats            = data["stats"],
-        categories       = data["categories"],
-        codebase_section = codebase_section,
-        file_instruction = file_instruction,
+        name              = schema.name,
+        diary             = data["diary"],
+        decisions         = data["decisions"],
+        lessons           = data["lessons"],
+        recent_proposals  = data["recent_proposals"],
+        params            = data["params"],
+        goals             = data["goals"],
+        stats             = data["stats"],
+        categories        = data["categories"],
+        codebase_section  = codebase_section,
+        file_instruction  = file_instruction,
     )
     resp = _get_client().messages.create(
         model       = schema.llm.model,
@@ -415,14 +447,15 @@ def _call_llm_creative(data: dict, schema: EngramSchema) -> list:
         domain = schema.domain[:300] or f"a decision system called {schema.name}",
     )
     prompt = _PROMPT_CREATIVE_TMPL.format(
-        name       = schema.name,
-        diary      = data["diary"],
-        decisions  = data["decisions"],
-        lessons    = data["lessons"],
-        params     = data["params"],
-        goals      = data["goals"],
-        stats      = data["stats"],
-        categories = " | ".join(creative_categories),
+        name              = schema.name,
+        diary             = data["diary"],
+        decisions         = data["decisions"],
+        lessons           = data["lessons"],
+        recent_proposals  = data["recent_proposals"],
+        params            = data["params"],
+        goals             = data["goals"],
+        stats             = data["stats"],
+        categories        = " | ".join(creative_categories),
     )
     resp = _get_client().messages.create(
         model       = schema.llm.model,
@@ -464,11 +497,27 @@ def _write(proposals: list, today_str: str) -> int:
             continue
 
         code_change = (p.get("code_change") or "").strip() or None
+
+        def _clean_int_list(raw) -> list[int]:
+            if not isinstance(raw, list):
+                return []
+            out = []
+            for x in raw:
+                try:
+                    out.append(int(x))
+                except (TypeError, ValueError):
+                    continue
+            return out
+
+        lesson_ids   = _clean_int_list(p.get("source_lesson_ids"))
+        decision_ids = _clean_int_list(p.get("source_decision_ids"))
+
         db.execute(
             "INSERT INTO proposals "
             "(written_ts, analysis_date, category, priority, title, problem, "
-            "evidence, proposal, affected_files, code_change, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+            "evidence, proposal, affected_files, code_change, status, "
+            "source_lesson_ids, source_decision_ids) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
             (
                 now_iso,
                 today_str,
@@ -480,6 +529,8 @@ def _write(proposals: list, today_str: str) -> int:
                 (p.get("proposal") or "").strip(),
                 (p.get("affected_files") or "").strip(),
                 code_change,
+                json.dumps(lesson_ids),
+                json.dumps(decision_ids),
             ),
         )
         written += 1

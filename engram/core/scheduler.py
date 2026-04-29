@@ -69,12 +69,13 @@ class Scheduler:
         propose_h, propose_m, propose_tz = _parse_time(sc.propose_time)
         checkpoint_weekday = _WEEKDAY_MAP.get(sc.checkpoint_day, 6)
 
-        diary_done_today     = False
-        propose_done_today   = False
-        checkpoint_done_week = False
-        extract_done_week    = False
-        last_day             = -1
-        last_week            = -1
+        diary_done_today      = False
+        propose_done_today    = False
+        extract_done_today    = False
+        checkpoint_done_week  = False
+        extract_done_week     = False
+        last_day              = -1
+        last_week             = -1
 
         while not self._stop.is_set():
             try:
@@ -85,6 +86,7 @@ class Scheduler:
                 if day != last_day:
                     diary_done_today   = False
                     propose_done_today = False
+                    extract_done_today = False
                     last_day = day
 
                 if week_num != last_week:
@@ -98,6 +100,15 @@ class Scheduler:
                     from engram.core import diary
                     diary.write(self._schema)
                     diary_done_today = True
+
+                # Daily lesson extraction (if configured) — fires alongside diary
+                if (not extract_done_today
+                        and sc.lesson_extraction == "daily"
+                        and _in_window(diary_h, diary_m, diary_tz)):
+                    logger.info("Engram: running daily lesson extraction")
+                    from engram.core import extractor
+                    extractor.extract(self._schema)
+                    extract_done_today = True
 
                 # Nightly proposals
                 if not propose_done_today and _in_window(propose_h, propose_m, propose_tz):
